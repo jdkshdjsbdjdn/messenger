@@ -4,7 +4,7 @@ import websockets
 import psycopg2
 from psycopg2.extras import execute_values
 
-# --- PostgreSQL bağlantısı ---
+# PostgreSQL bağlantısı
 DATABASE_URL = os.environ.get("DATABASE_URL")
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
@@ -21,9 +21,9 @@ CREATE TABLE IF NOT EXISTS messages (
 conn.commit()
 
 clients = {}  # websocket -> username
-message_queue = asyncio.Queue()  # mesajları batch işlemek için
+message_queue = asyncio.Queue()
 
-# --- Mesajları batch ile kaydetme task ---
+# DB worker
 async def db_worker():
     while True:
         batch = []
@@ -35,21 +35,19 @@ async def db_worker():
                 [(s, r, m) for s, r, m in batch]
             )
             conn.commit()
-        await asyncio.sleep(1)  # 1 saniye aralıklarla commit
+        await asyncio.sleep(1)
 
-# --- WebSocket handler ---
+# WebSocket handler
 async def handler(websocket):
     username = await websocket.recv()
     clients[websocket] = username
     print(f"🔗 {username} bağlandı.")
 
-    # Önce mesaj geçmişini gönder
+    # Mesaj geçmişi
     cur.execute("SELECT sender, receiver, message FROM messages ORDER BY id ASC")
-    rows = cur.fetchall()
-    for row in rows:
-        sender, receiver, message = row
+    for sender, receiver, message in cur.fetchall():
         if receiver == "ALL" or receiver == username:
-            msg = f"{sender}: {message}" if receiver == "ALL" else f"[Özel] {sender}: {message}"
+            msg = f"{sender}: {message}" if receiver=="ALL" else f"[Özel] {sender}: {message}"
             await websocket.send(msg)
 
     await notify_users()
@@ -60,7 +58,7 @@ async def handler(websocket):
                 try:
                     _, target, *msg_parts = message.split(" ")
                     msg_text = " ".join(msg_parts)
-                    target_ws = next((ws for ws, name in clients.items() if name == target), None)
+                    target_ws = next((ws for ws, name in clients.items() if name==target), None)
                     if target_ws:
                         full_msg = f"[Özel] {username}: {msg_text}"
                         await target_ws.send(full_msg)
@@ -79,7 +77,6 @@ async def handler(websocket):
         await notify_users()
         print(f"❌ {username} ayrıldı.")
 
-# --- Broadcast ---
 async def broadcast(message):
     for ws in list(clients.keys()):
         try:
@@ -87,7 +84,6 @@ async def broadcast(message):
         except:
             pass
 
-# --- Online kullanıcı bildirimi ---
 async def notify_users():
     users = ", ".join(clients.values())
     for ws in list(clients.keys()):
@@ -96,16 +92,14 @@ async def notify_users():
         except:
             pass
 
-# --- Main ---
 async def main():
     PORT = int(os.environ.get("PORT", 8765))
-    # DB worker task başlat
     asyncio.create_task(db_worker())
     async with websockets.serve(handler, "0.0.0.0", PORT):
         print(f"✅ Sunucu çalışıyor: ws://0.0.0.0:{PORT}")
-        # Sonsuz bekleme
         stop_event = asyncio.Event()
         await stop_event.wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
+
