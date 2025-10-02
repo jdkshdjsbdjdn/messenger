@@ -2,9 +2,10 @@ import os
 import asyncio
 import websockets
 import psycopg2
+from psycopg2.extras import execute_values
 
 # --- PostgreSQL bağlantısı ---
-DATABASE_URL = os.environ.get("DATABASE_URL")  # Burayı değiştir
+DATABASE_URL = os.environ.get("DATABASE_URL")
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
@@ -20,9 +21,24 @@ CREATE TABLE IF NOT EXISTS messages (
 conn.commit()
 
 clients = {}  # websocket -> username
+message_queue = asyncio.Queue()  # mesajları batch işlemek için
 
+# --- Mesajları batch ile kaydetme task ---
+async def db_worker():
+    while True:
+        batch = []
+        while not message_queue.empty():
+            batch.append(await message_queue.get())
+        if batch:
+            execute_values(cur,
+                "INSERT INTO messages (sender, receiver, message) VALUES %s",
+                [(s, r, m) for s, r, m in batch]
+            )
+            conn.commit()
+        await asyncio.sleep(1)  # 1 saniye aralıklarla commit
+
+# --- WebSocket handler ---
 async def handler(websocket):
-    # Kullanıcı adı al
     username = await websocket.recv()
     clients[websocket] = username
     print(f"🔗 {username} bağlandı.")
@@ -33,13 +49,9 @@ async def handler(websocket):
     for row in rows:
         sender, receiver, message = row
         if receiver == "ALL" or receiver == username:
-            if receiver == "ALL":
-                msg = f"{sender}: {message}"
-            else:
-                msg = f"[Özel] {sender}: {message}"
+            msg = f"{sender}: {message}" if receiver == "ALL" else f"[Özel] {sender}: {message}"
             await websocket.send(msg)
 
-    # Online kullanıcıları bildir
     await notify_users()
 
     try:
@@ -48,29 +60,26 @@ async def handler(websocket):
                 try:
                     _, target, *msg_parts = message.split(" ")
                     msg_text = " ".join(msg_parts)
-                    target_ws = None
-                    for ws, name in clients.items():
-                        if name == target:
-                            target_ws = ws
-                            break
+                    target_ws = next((ws for ws, name in clients.items() if name == target), None)
                     if target_ws:
                         full_msg = f"[Özel] {username}: {msg_text}"
                         await target_ws.send(full_msg)
                         await websocket.send(f"[→ {target}] {msg_text}")
-                        save_message(username, target, msg_text)
+                        await message_queue.put((username, target, msg_text))
                     else:
                         await websocket.send(f"⚠ Kullanıcı {target} çevrimdışı.")
                 except:
                     await websocket.send("⚠ Özel mesaj formatı: /w KullanıcıAdı mesaj")
             else:
                 full_msg = f"{username}: {message}"
-                save_message(username, "ALL", message)
+                await message_queue.put((username, "ALL", message))
                 await broadcast(full_msg)
     finally:
         del clients[websocket]
         await notify_users()
         print(f"❌ {username} ayrıldı.")
 
+# --- Broadcast ---
 async def broadcast(message):
     for ws in list(clients.keys()):
         try:
@@ -78,6 +87,7 @@ async def broadcast(message):
         except:
             pass
 
+# --- Online kullanıcı bildirimi ---
 async def notify_users():
     users = ", ".join(clients.values())
     for ws in list(clients.keys()):
@@ -86,16 +96,16 @@ async def notify_users():
         except:
             pass
 
-def save_message(sender, receiver, message):
-    cur.execute("INSERT INTO messages (sender, receiver, message) VALUES (%s, %s, %s)",
-                (sender, receiver, message))
-    conn.commit()
-
+# --- Main ---
 async def main():
-    PORT = int(os.environ.get("PORT", 8765))  # Railway port
+    PORT = int(os.environ.get("PORT", 8765))
+    # DB worker task başlat
+    asyncio.create_task(db_worker())
     async with websockets.serve(handler, "0.0.0.0", PORT):
         print(f"✅ Sunucu çalışıyor: ws://0.0.0.0:{PORT}")
-        await asyncio.Future()
+        # Sonsuz bekleme
+        stop_event = asyncio.Event()
+        await stop_event.wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
