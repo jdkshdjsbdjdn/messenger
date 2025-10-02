@@ -4,7 +4,7 @@ import websockets
 import psycopg2
 
 # --- PostgreSQL bağlantısı ---
-DATABASE_URL = os.environ.get("postgresql://${{PGUSER}}:${{POSTGRES_PASSWORD}}@${{RAILWAY_PRIVATE_DOMAIN}}:5432/${{PGDATABASE}}")  # Railway otomatik veriyor
+DATABASE_URL = os.environ.get("DATABASE_URL")  # Burayı değiştir
 conn = psycopg2.connect(DATABASE_URL)
 cur = conn.cursor()
 
@@ -92,7 +92,7 @@ def save_message(sender, receiver, message):
     conn.commit()
 
 async def main():
-    PORT = int(os.environ.get("PORT", 8765))
+    PORT = int(os.environ.get("PORT", 8765))  # Railway port
     async with websockets.serve(handler, "0.0.0.0", PORT):
         print(f"✅ Sunucu çalışıyor: ws://0.0.0.0:{PORT}")
         await asyncio.Future()
